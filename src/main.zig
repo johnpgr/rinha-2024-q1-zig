@@ -6,7 +6,7 @@ const port = 8080;
 fn on_request(r: zap.Request) void {
     var path_parts: [3][]const u8 = [_][]const u8{ "", "", "" };
 
-    var it = std.mem.split(u8, r.path orelse return bad_request(r), "/");
+    var it = std.mem.split(u8, r.path orelse return bad_request(&r), "/");
 
     while (it.next()) |part| {
         if (part.len == 0) {
@@ -36,52 +36,52 @@ fn on_request(r: zap.Request) void {
 
     if (std.mem.eql(u8, path_parts[0], "clientes")) {
         var cliente_id = std.fmt.parseInt(u8, path_parts[1], 10) catch {
-            return bad_request(r);
+            return bad_request(&r);
         };
 
         if (cliente_id < 1 or cliente_id > 5) {
-            return not_found(r);
+            return not_found(&r);
         }
 
         if (std.mem.eql(u8, path_parts[2], "extrato")) {
-            return route_cliente_extrato(r, cliente_id);
+            return route_cliente_extrato(&r, cliente_id);
         } else if (std.mem.eql(u8, path_parts[2], "transacoes")) {
-            return route_cliente_transacoes(r, cliente_id);
+            return route_cliente_transacoes(&r, cliente_id);
         } else {
-            return not_found(r);
+            return not_found(&r);
         }
     }
 
-    return not_found(r);
+    return not_found(&r);
 }
 
-fn not_found(req: zap.Request) void {
+fn not_found(req: *const zap.Request) void {
     req.setStatus(.not_found);
     req.sendBody("") catch return;
 }
 
-fn bad_request(req: zap.Request) void {
+fn bad_request(req: *const zap.Request) void {
     req.setStatus(.bad_request);
     req.sendBody("") catch return;
 }
 
-fn unprocessable_entity(req: zap.Request) void {
+fn unprocessable_entity(req: *const zap.Request) void {
     req.setStatus(.unprocessable_entity);
     req.sendBody("") catch return;
 }
 
-fn json(req: *zap.Request, body: []const u8) void {
+fn json(req: *const zap.Request, body: []const u8) void {
     req.setStatus(.ok);
     req.setContentType(.JSON);
     try req.sendBody(body);
 }
 
-fn route_cliente_extrato(r: zap.Request, cliente_id: u8) void {
+fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
     _ = r;
     std.debug.print("Route: cliente_extrato; cliente_id: {}\n", .{cliente_id});
 }
 
-fn route_cliente_transacoes(r: zap.Request, cliente_id: u8) void {
+fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
     _ = r;
     std.debug.print("Route: cliente_transacoes; cliente_id: {}\n", .{cliente_id});
 }
