@@ -1,6 +1,5 @@
 const std = @import("std");
 const zap = @import("zap");
-const alloc = std.mem.heap_allocator;
 const port = 8080;
 
 fn on_request(r: zap.Request) void {
@@ -73,7 +72,7 @@ fn unprocessable_entity(req: *const zap.Request) void {
 fn json(req: *const zap.Request, body: []const u8) void {
     req.setStatus(.ok);
     req.setContentType(.JSON);
-    try req.sendBody(body);
+    req.sendBody(body) catch return;
 }
 
 fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
