@@ -1,8 +1,12 @@
 const std = @import("std");
 const zap = @import("zap");
-const port = 8080;
+const pg = @import("pg");
+const exit = std.os.exit;
+
+const PORT = 8080;
 
 fn on_request(r: zap.Request) void {
+    //initialize path_parts with empty strings
     var path_parts: [3][]const u8 = [_][]const u8{ "", "", "" };
 
     var it = std.mem.split(u8, r.path orelse return bad_request(&r), "/");
@@ -14,6 +18,7 @@ fn on_request(r: zap.Request) void {
 
         var should_continue = false;
 
+        //find the first empty slot in path_parts
         for (path_parts) |p| {
             if (p.len == 0) {
                 should_continue = true;
@@ -25,6 +30,7 @@ fn on_request(r: zap.Request) void {
             break;
         }
 
+        //fill the first empty slot with the current part
         for (0..path_parts.len) |i| {
             if (path_parts[i].len == 0) {
                 path_parts[i] = part;
@@ -86,18 +92,49 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
 }
 
 pub fn main() !void {
+    var nr_workers = try std.Thread.getCpuCount();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var allocator = gpa.allocator();
+    var db_user = std.os.getenv("DB_USER") orelse {
+        std.debug.print("DB_USER not set\n", .{});
+        exit(1);
+    };
+    var db_pass = std.os.getenv("DB_PASSWORD") orelse {
+        std.debug.print("DB_PASSWORD not set\n", .{});
+        exit(1);
+    };
+    var db_name = std.os.getenv("DB_NAME") orelse {
+        std.debug.print("DB_NAME not set\n", .{});
+        exit(1);
+    };
+
+    var pool = try pg.Pool.init(allocator, .{
+        .size = @intCast(nr_workers),
+        .connect = .{
+            .port = 5432,
+            .host = "localhost",
+        },
+        .auth = .{
+            .username = db_user,
+            .password = db_pass,
+            .database = db_name,
+            .timeout = 10_000,
+        },
+    });
+    _ = pool;
+
     var listener = zap.HttpListener.init(.{
-        .port = port,
+        .port = PORT,
         .on_request = on_request,
         .log = true,
         .max_clients = 100000,
     });
     try listener.listen();
 
-    std.debug.print("Listening on 0.0.0.0:{}\n", .{ .port = port });
+    std.debug.print("[ZAP] Running app on 0.0.0.0:{}\n[ZAP] We have {} workers", .{ PORT, nr_workers });
 
     zap.start(.{
-        .threads = 11,
-        .workers = 11,
+        .threads = @intCast(nr_workers),
+        .workers = @intCast(nr_workers),
     });
 }
