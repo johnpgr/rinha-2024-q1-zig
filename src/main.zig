@@ -1,15 +1,90 @@
 const std = @import("std");
 const zap = @import("zap");
 const pg = @import("pg");
+const Time = @import("time.zig").Time;
 const exit = std.os.exit;
 
-const PORT = 8080;
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var allocator = gpa.allocator();
+
+const Cliente = struct { id: u8, nome: []const u8, limite: i64, saldo: i64 };
+
+const Extrato = struct {
+    saldo: struct {
+        total: i64,
+        data_extrato: []const u8,
+        limite: i64,
+    },
+    ultimas_transacoes: [10]Transacao,
+};
+
+const TransacaoRequestError = error{
+    InvalidValor,
+    InvalidTipo,
+    InvalidDescricao,
+};
+
+const TransacaoRequest = struct {
+    const Self = @This();
+
+    valor: f64,
+    tipo: []const u8,
+    descricao: []const u8,
+
+    pub fn to_transacao(self: *Self, cliente_id: u8) TransacaoRequestError!Transacao {
+        var valor_mod = std.math.modf(self.valor);
+
+        if (valor_mod.ipart < 0.0 or (valor_mod.fpart != 0.0)) {
+            return error.InvalidValor;
+        }
+        if (self.descricao.len == 0 or self.descricao.len > 10) {
+            return error.InvalidDescricao;
+        }
+
+        if (!std.mem.eql(u8, self.tipo, "c")) {
+            return error.InvalidTipo;
+        } else if (!std.mem.eql(u8, self.tipo, "d")) {
+            return error.InvalidTipo;
+        }
+
+        var tipo = [1]u8{self.tipo[0]};
+        var descricao: [10]u8 = undefined;
+        std.mem.copy(u8, &descricao, self.descricao);
+        var valor: i64 = @intFromFloat(valor_mod.ipart);
+
+        return Transacao{
+            .id = null,
+            .cliente_id = cliente_id,
+            .valor = valor,
+            .tipo = tipo,
+            .descricao = descricao,
+            .realizada_em = Time.now(),
+        };
+    }
+};
+
+const Transacao = struct {
+    const Self = @This();
+
+    id: ?u8,
+    cliente_id: u8,
+    valor: i64,
+    tipo: [1]u8,
+    descricao: [10]u8,
+    realizada_em: Time,
+
+    pub fn from_json(json_str: []const u8, cliente_id: u8) !Self {
+        var parsed = try std.json.parseFromSlice(TransacaoRequest, allocator, json_str, .{});
+        defer parsed.deinit();
+        return try parsed.value.to_transacao(cliente_id);
+    }
+};
 
 fn on_request(r: zap.Request) void {
-    //initialize path_parts with empty strings
-    var path_parts: [3][]const u8 = [_][]const u8{ "", "", "" };
+    var path = r.path orelse return bad_request(&r);
+    var path_parts: [3][]const u8 = .{ "", "", "" };
 
-    var it = std.mem.split(u8, r.path orelse return bad_request(&r), "/");
+    var it = std.mem.split(u8, path, "/");
 
     while (it.next()) |part| {
         if (part.len == 0) {
@@ -71,7 +146,7 @@ fn bad_request(req: *const zap.Request) void {
 }
 
 fn unprocessable_entity(req: *const zap.Request) void {
-    req.setStatus(.unprocessable_entity);
+    req.h.*.status = @as(usize, @intCast(422));
     req.sendBody("") catch return;
 }
 
@@ -82,19 +157,26 @@ fn json(req: *const zap.Request, body: []const u8) void {
 }
 
 fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
+    _ = cliente_id;
     _ = r;
-    std.debug.print("Route: cliente_extrato; cliente_id: {}\n", .{cliente_id});
 }
 
 fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
-    _ = r;
-    std.debug.print("Route: cliente_transacoes; cliente_id: {}\n", .{cliente_id});
+    if (r.body) |body| {
+        std.debug.print("body: {s}\n", .{body});
+        var transacao = Transacao.from_json(body, cliente_id) catch |err| {
+            std.debug.print("err: {any}\n", .{err});
+            return unprocessable_entity(r);
+        };
+        std.debug.print("transacao: {any}\n", .{transacao});
+    }
+
+    return bad_request(r);
 }
 
 pub fn main() !void {
+    const PORT = 8080;
     var nr_workers = try std.Thread.getCpuCount();
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    var allocator = gpa.allocator();
     var db_user = std.os.getenv("DB_USER") orelse {
         std.debug.print("DB_USER not set\n", .{});
         exit(1);
@@ -121,13 +203,13 @@ pub fn main() !void {
             .timeout = 10_000,
         },
     });
-    _ = pool;
+    defer pool.deinit();
 
     var listener = zap.HttpListener.init(.{
         .port = PORT,
         .on_request = on_request,
         .log = true,
-        .max_clients = 100000,
+        .max_clients = 100_000,
     });
     try listener.listen();
 
