@@ -17,13 +17,12 @@ const TransacaoResponse = struct {
 };
 
 const Cliente = struct {
-    const Self = @This();
-
     id: u8,
     nome: []u8,
     limite: i32,
     saldo: i32,
 
+    const Self = @This();
     pub fn get_extrato(db: *pg.Conn, cliente_id: u8) !Extrato {
         const query =
             \\ SELECT c.saldo, c.limite, t.valor, t.tipo, t.descricao, t.realizada_em
@@ -34,31 +33,40 @@ const Cliente = struct {
             \\ LIMIT 10
         ;
 
-        var res = try db.query(query, .{cliente_id});
+        var res = try db.queryOpts(query, .{cliente_id}, .{ .column_names = true });
         defer res.deinit();
 
         var saldo: i32 = 0;
         var limite: i32 = 0;
+        var ultimas_transacoes: ?[10]?Transacao = null;
         var data_extrato = Time.now().format_rfc3339();
-        var ultimas_transacoes: [10]Transacao = .{};
 
         var i: u8 = 0;
         while (try res.next()) |row| {
             if (i == 9) {
                 break;
             }
+
             saldo = row.get(i32, 0);
             limite = row.get(i32, 1);
 
+            if (row.values[2].is_null) {
+                break;
+            }
+
             var transacao = Transacao{
-                .id = null,
                 .cliente_id = cliente_id,
                 .valor = row.get(i32, 2),
-                .tipo = row.get([]u8, 3),
-                .descricao = row.get([]u8, 4),
-                .realizada_em = Time.from_timestamp(row.get(i64, 5)),
+                .tipo = row.get([]const u8, 3),
+                .descricao = row.get([]const u8, 4),
+                .realizada_em = row.get([]const u8, 5),
             };
-            ultimas_transacoes[i] = transacao;
+
+            if (ultimas_transacoes == null) {
+                ultimas_transacoes = .{ null, null, null, null, null, null, null, null, null, null };
+            }
+            ultimas_transacoes.?[i] = transacao;
+
             i += 1;
         }
 
@@ -95,14 +103,12 @@ const Cliente = struct {
 };
 
 const Extrato = struct {
-    const Self = @This();
-
     saldo: struct {
         total: i32,
         data_extrato: [20]u8,
         limite: i32,
     },
-    ultimas_transacoes: [10]Transacao,
+    ultimas_transacoes: ?[10]?Transacao,
 };
 
 const TransacaoRequestError = error{
@@ -113,16 +119,13 @@ const TransacaoRequestError = error{
 };
 
 const TransacaoRequest = struct {
-    const Self = @This();
-
     valor: f64,
     tipo: []const u8,
     descricao: []const u8,
 
-    pub fn to_transacao(self: *Self, cliente_id: u8) TransacaoRequestError!*Transacao {
-        var transacao = allocator.create(Transacao) catch unreachable; //BUY MORE RAM LOL LOL
-        errdefer allocator.destroy(transacao);
+    const Self = @This();
 
+    pub fn to_transacao(self: *Self, cliente_id: u8) TransacaoRequestError!Transacao {
         var valor_mod = std.math.modf(self.valor);
 
         if (valor_mod.ipart < 0.0 or (valor_mod.fpart != 0.0)) {
@@ -139,24 +142,21 @@ const TransacaoRequest = struct {
         }
 
         var valor: i32 = @intFromFloat(valor_mod.ipart);
-        var realizada_em = Time.now();
 
-        transacao.* = .{ .id = null, .cliente_id = cliente_id, .valor = valor, .tipo = self.tipo, .descricao = self.descricao, .realizada_em = realizada_em };
-        return transacao;
+        return .{ .cliente_id = cliente_id, .valor = valor, .tipo = self.tipo, .descricao = self.descricao, .realizada_em = null };
     }
 };
 
 const Transacao = struct {
-    const Self = @This();
-
-    id: ?u8,
     cliente_id: ?u8,
     valor: i32,
     tipo: []const u8,
     descricao: []const u8,
-    realizada_em: *Time,
+    realizada_em: ?[]const u8,
 
-    pub fn from_json(json_str: []const u8, cliente_id: u8) !*Self {
+    const Self = @This();
+
+    pub fn from_json(json_str: []const u8, cliente_id: u8) !Self {
         var parsed = try std.json.parseFromSlice(TransacaoRequest, allocator, json_str, .{});
         defer parsed.deinit();
         return try parsed.value.to_transacao(cliente_id);
@@ -164,8 +164,8 @@ const Transacao = struct {
 
     pub fn save(self: *const Self, db: *pg.Conn) !void {
         const query =
-            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao, realizada_em)
-            \\ VALUES ($1, $2, $3, $4, $5)
+            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao)
+            \\ VALUES ($1, $2, $3, $4)
         ;
 
         var buffer: [11]u8 = undefined;
@@ -177,16 +177,18 @@ const Transacao = struct {
 
         std.debug.print("tipo: {s}\n", .{tipo});
         std.debug.print("descricao: {s}\n", .{descricao});
+        std.debug.print("realizada_em: {any}\n", .{self.realizada_em});
 
         //FIXME: Find a way to use the self fields directly in the query
         // Currently it gives compile errors because it doesn't accepts []const u8 values here idk why
-        _ = try db.exec(query, .{
+        var res = try db.query(query, .{
             self.cliente_id orelse unreachable,
             self.valor,
             tipo,
             descricao,
-            self.realizada_em.to_timestamp(),
         });
+
+        std.debug.print("res: {any}\n", .{res});
     }
 };
 
@@ -266,10 +268,10 @@ fn internal_error(req: *const zap.Request) void {
 }
 
 fn json(req: *const zap.Request, res: anytype) void {
-    var buffer: [100]u8 = undefined;
+    var buf: [200]u8 = undefined;
     var json_to_send: []const u8 = undefined;
 
-    if (zap.stringifyBuf(&buffer, res, .{})) |json_str| {
+    if (zap.stringifyBuf(&buf, res, .{})) |json_str| {
         json_to_send = json_str;
     } else {
         req.setStatus(.internal_server_error);
@@ -277,6 +279,7 @@ fn json(req: *const zap.Request, res: anytype) void {
         return;
     }
 
+    std.debug.print("json_to_send {s}\n", .{json_to_send});
     req.setStatus(.ok);
     req.setContentType(.JSON) catch unreachable;
     req.sendBody(json_to_send) catch unreachable;
@@ -293,6 +296,8 @@ fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
         std.debug.print("err: {any}\n", .{err});
         return internal_error(r);
     };
+
+    std.debug.print("extrato.saldo.data_extrato: {s}\n", .{extrato.saldo.data_extrato});
 
     return json(r, extrato);
 }
@@ -322,11 +327,13 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
 
         var result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch |err| {
             std.debug.print("Cliente.efetuar_transacao() err: {any}\n", .{err});
+            std.debug.print("transacao: {any}\n", .{transacao});
 
             return unprocessable_entity(r);
         };
         transacao.save(db2) catch |err| {
             std.debug.print("Transacao.save() err: {any}\n", .{err});
+            std.debug.print("transacao: {any}\n", .{transacao});
 
             return internal_error(r);
         };
