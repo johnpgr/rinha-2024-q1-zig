@@ -33,7 +33,7 @@ const Cliente = struct {
             \\ LIMIT 10
         ;
 
-        var res = try db.queryOpts(query, .{cliente_id}, .{ .column_names = true });
+        var res = try db.query(query, .{cliente_id});
         defer res.deinit();
 
         var saldo: i32 = 0;
@@ -308,11 +308,6 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
         return internal_error(r);
     };
     defer db.release();
-    var db2 = pool.?.*.acquire() catch |err| {
-        std.debug.print("err: {any}\n", .{err});
-        return internal_error(r);
-    };
-    defer db2.release();
 
     if (r.body) |body| {
         var transacao = Transacao.from_json(body, cliente_id) catch |err| {
@@ -331,7 +326,18 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
 
             return unprocessable_entity(r);
         };
-        transacao.save(db2) catch |err| {
+
+        var ready = false;
+        while (!ready) {
+            db.readyForQuery() catch {
+                continue;
+            };
+
+            ready = true;
+            break;
+        }
+
+        transacao.save(db) catch |err| {
             std.debug.print("Transacao.save() err: {any}\n", .{err});
             std.debug.print("transacao: {any}\n", .{transacao});
 
