@@ -3,13 +3,57 @@ const zap = @import("zap");
 const pg = @import("pg");
 const Time = @import("time.zig").Time;
 const exit = std.os.exit;
+const PORT = 8080;
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa = std.heap.GeneralPurposeAllocator(.{
+    .thread_safe = true,
+}){};
 var allocator = gpa.allocator();
+var pool: *pg.Pool = undefined;
 
-const Cliente = struct { id: u8, nome: []const u8, limite: i64, saldo: i64 };
+const TransacaoResponse = struct {
+    saldo: i32,
+    limite: i32,
+};
+
+const Cliente = struct {
+    const Self = @This();
+
+    id: u8,
+    nome: []const u8,
+    limite: i64,
+    saldo: i64,
+
+    pub fn efetuar_transacao(db: *pg.Conn, cliente_id: u8, valor_transacao: i64) !TransacaoResponse {
+        const query =
+            \\ UPDATE cliente
+            \\ SET saldo = saldo + $2
+            \\ WHERE
+            \\   id = $1
+            \\   AND $2 + saldo + limite >= 0
+            \\ RETURNING saldo, limite
+        ;
+
+        var res = try db.query(query, .{
+            cliente_id,
+            valor_transacao,
+        });
+        defer res.deinit();
+
+        while (try res.next()) |row| {
+            //TODO: Find why this panics if using row.get(i64) here
+            var saldo = row.get(i32, 0);
+            var limite = row.get(i32, 1);
+            return .{ .saldo = saldo, .limite = limite };
+        }
+
+        return error.InsufficientFunds;
+    }
+};
 
 const Extrato = struct {
+    const Self = @This();
+
     saldo: struct {
         total: i64,
         data_extrato: []const u8,
@@ -22,6 +66,7 @@ const TransacaoRequestError = error{
     InvalidValor,
     InvalidTipo,
     InvalidDescricao,
+    InsufficientFunds,
 };
 
 const TransacaoRequest = struct {
@@ -41,9 +86,9 @@ const TransacaoRequest = struct {
             return error.InvalidDescricao;
         }
 
-        if (!std.mem.eql(u8, self.tipo, "c")) {
-            return error.InvalidTipo;
-        } else if (!std.mem.eql(u8, self.tipo, "d")) {
+        var is_credito = std.mem.eql(u8, self.tipo, "c");
+        var is_debito = std.mem.eql(u8, self.tipo, "d");
+        if (!is_credito and !is_debito) {
             return error.InvalidTipo;
         }
 
@@ -77,6 +122,21 @@ const Transacao = struct {
         var parsed = try std.json.parseFromSlice(TransacaoRequest, allocator, json_str, .{});
         defer parsed.deinit();
         return try parsed.value.to_transacao(cliente_id);
+    }
+
+    pub fn save(self: *Self, db: *pg.Conn) !void {
+        const query =
+            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao, realizada_em)
+            \\ VALUES ($1, $2, $3, $4, $5)
+        ;
+
+        try db.exec(query, .{
+            self.cliente_id,
+            self.valor,
+            self.tipo,
+            self.descricao,
+            self.realizada_em,
+        });
     }
 };
 
@@ -137,23 +197,39 @@ fn on_request(r: zap.Request) void {
 
 fn not_found(req: *const zap.Request) void {
     req.setStatus(.not_found);
-    req.sendBody("") catch return;
+    req.sendBody("") catch unreachable;
 }
 
 fn bad_request(req: *const zap.Request) void {
     req.setStatus(.bad_request);
-    req.sendBody("") catch return;
+    req.sendBody("") catch unreachable;
 }
 
 fn unprocessable_entity(req: *const zap.Request) void {
     req.h.*.status = @as(usize, @intCast(422));
-    req.sendBody("") catch return;
+    req.sendBody("") catch unreachable;
 }
 
-fn json(req: *const zap.Request, body: []const u8) void {
+fn internal_error(req: *const zap.Request) void {
+    req.setStatus(.internal_server_error);
+    req.sendBody("") catch unreachable;
+}
+
+fn json(req: *const zap.Request, res: anytype) void {
+    var buffer: [100]u8 = undefined;
+    var json_to_send: []const u8 = undefined;
+
+    if (zap.stringifyBuf(&buffer, res, .{})) |json_str| {
+        json_to_send = json_str;
+    } else {
+        req.setStatus(.internal_server_error);
+        req.sendBody("") catch unreachable;
+        return;
+    }
+
     req.setStatus(.ok);
-    req.setContentType(.JSON);
-    req.sendBody(body) catch return;
+    req.setContentType(.JSON) catch unreachable;
+    req.sendBody(json_to_send) catch unreachable;
 }
 
 fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
@@ -162,20 +238,34 @@ fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
 }
 
 fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
+    var db = pool.acquire() catch |err| {
+        std.debug.print("err: {any}\n", .{err});
+        return internal_error(r);
+    };
+    defer db.release();
+
     if (r.body) |body| {
-        std.debug.print("body: {s}\n", .{body});
         var transacao = Transacao.from_json(body, cliente_id) catch |err| {
             std.debug.print("err: {any}\n", .{err});
             return unprocessable_entity(r);
         };
-        std.debug.print("transacao: {any}\n", .{transacao});
+
+        var valor_transacao = transacao.valor;
+        if (std.mem.eql(u8, &transacao.tipo, "d")) {
+            valor_transacao = valor_transacao * -1;
+        }
+
+        var result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch {
+            return unprocessable_entity(r);
+        };
+
+        return json(r, result);
     }
 
     return bad_request(r);
 }
 
 pub fn main() !void {
-    const PORT = 8080;
     var nr_workers = try std.Thread.getCpuCount();
     var db_user = std.os.getenv("DB_USER") orelse {
         std.debug.print("DB_USER not set\n", .{});
@@ -190,7 +280,7 @@ pub fn main() !void {
         exit(1);
     };
 
-    var pool = try pg.Pool.init(allocator, .{
+    pool = try pg.Pool.init(allocator, .{
         .size = @intCast(nr_workers),
         .connect = .{
             .port = 5432,
@@ -211,9 +301,13 @@ pub fn main() !void {
         .log = true,
         .max_clients = 100_000,
     });
-    try listener.listen();
 
-    std.debug.print("[ZAP] Running app on 0.0.0.0:{}\n[ZAP] We have {} workers", .{ PORT, nr_workers });
+    listener.listen() catch |err| {
+        std.debug.print("Error: {any}\n", .{err});
+        exit(1);
+    };
+
+    std.debug.print("[ZAP] Running app on 0.0.0.0:{}\n[ZAP] We have {} workers\n", .{ PORT, nr_workers });
 
     zap.start(.{
         .threads = @intCast(nr_workers),
