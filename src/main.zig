@@ -9,7 +9,7 @@ var gpa = std.heap.GeneralPurposeAllocator(.{
     .thread_safe = true,
 }){};
 var allocator = gpa.allocator();
-var pool: *pg.Pool = undefined;
+var pool: ?*pg.Pool = null;
 
 const TransacaoResponse = struct {
     saldo: i32,
@@ -20,11 +20,55 @@ const Cliente = struct {
     const Self = @This();
 
     id: u8,
-    nome: []const u8,
-    limite: i64,
-    saldo: i64,
+    nome: []u8,
+    limite: i32,
+    saldo: i32,
 
-    pub fn efetuar_transacao(db: *pg.Conn, cliente_id: u8, valor_transacao: i64) !TransacaoResponse {
+    pub fn get_extrato(db: *pg.Conn, cliente_id: u8) !Extrato {
+        const query =
+            \\ SELECT c.saldo, c.limite, t.valor, t.tipo, t.descricao, t.realizada_em
+            \\ FROM cliente c
+            \\ LEFT JOIN transacao t ON c.id = t.cliente_id
+            \\ WHERE c.id = $1
+            \\ ORDER BY t.id DESC
+            \\ LIMIT 10
+        ;
+
+        var res = try db.query(query, .{cliente_id});
+        defer res.deinit();
+
+        var saldo: i32 = 0;
+        var limite: i32 = 0;
+        var data_extrato = Time.now().format_rfc3339();
+        var ultimas_transacoes: [10]Transacao = .{};
+
+        var i: u8 = 0;
+        while (try res.next()) |row| {
+            if (i == 9) {
+                break;
+            }
+            saldo = row.get(i32, 0);
+            limite = row.get(i32, 1);
+
+            var transacao = Transacao{
+                .id = null,
+                .cliente_id = cliente_id,
+                .valor = row.get(i32, 2),
+                .tipo = row.get([]u8, 3),
+                .descricao = row.get([]u8, 4),
+                .realizada_em = Time.from_timestamp(row.get(i64, 5)),
+            };
+            ultimas_transacoes[i] = transacao;
+            i += 1;
+        }
+
+        return .{
+            .saldo = .{ .total = saldo, .data_extrato = data_extrato, .limite = limite },
+            .ultimas_transacoes = ultimas_transacoes,
+        };
+    }
+
+    pub fn efetuar_transacao(db: *pg.Conn, cliente_id: u8, valor_transacao: i32) !TransacaoResponse {
         const query =
             \\ UPDATE cliente
             \\ SET saldo = saldo + $2
@@ -41,7 +85,6 @@ const Cliente = struct {
         defer res.deinit();
 
         while (try res.next()) |row| {
-            //TODO: Find why this panics if using row.get(i64) here
             var saldo = row.get(i32, 0);
             var limite = row.get(i32, 1);
             return .{ .saldo = saldo, .limite = limite };
@@ -55,9 +98,9 @@ const Extrato = struct {
     const Self = @This();
 
     saldo: struct {
-        total: i64,
-        data_extrato: []const u8,
-        limite: i64,
+        total: i32,
+        data_extrato: [20]u8,
+        limite: i32,
     },
     ultimas_transacoes: [10]Transacao,
 };
@@ -76,7 +119,10 @@ const TransacaoRequest = struct {
     tipo: []const u8,
     descricao: []const u8,
 
-    pub fn to_transacao(self: *Self, cliente_id: u8) TransacaoRequestError!Transacao {
+    pub fn to_transacao(self: *Self, cliente_id: u8) TransacaoRequestError!*Transacao {
+        var transacao = allocator.create(Transacao) catch unreachable; //BUY MORE RAM LOL LOL
+        errdefer allocator.destroy(transacao);
+
         var valor_mod = std.math.modf(self.valor);
 
         if (valor_mod.ipart < 0.0 or (valor_mod.fpart != 0.0)) {
@@ -92,19 +138,11 @@ const TransacaoRequest = struct {
             return error.InvalidTipo;
         }
 
-        var tipo = [1]u8{self.tipo[0]};
-        var descricao: [10]u8 = undefined;
-        std.mem.copy(u8, &descricao, self.descricao);
-        var valor: i64 = @intFromFloat(valor_mod.ipart);
+        var valor: i32 = @intFromFloat(valor_mod.ipart);
+        var realizada_em = Time.now();
 
-        return Transacao{
-            .id = null,
-            .cliente_id = cliente_id,
-            .valor = valor,
-            .tipo = tipo,
-            .descricao = descricao,
-            .realizada_em = Time.now(),
-        };
+        transacao.* = .{ .id = null, .cliente_id = cliente_id, .valor = valor, .tipo = self.tipo, .descricao = self.descricao, .realizada_em = realizada_em };
+        return transacao;
     }
 };
 
@@ -112,30 +150,42 @@ const Transacao = struct {
     const Self = @This();
 
     id: ?u8,
-    cliente_id: u8,
-    valor: i64,
-    tipo: [1]u8,
-    descricao: [10]u8,
-    realizada_em: Time,
+    cliente_id: ?u8,
+    valor: i32,
+    tipo: []const u8,
+    descricao: []const u8,
+    realizada_em: *Time,
 
-    pub fn from_json(json_str: []const u8, cliente_id: u8) !Self {
+    pub fn from_json(json_str: []const u8, cliente_id: u8) !*Self {
         var parsed = try std.json.parseFromSlice(TransacaoRequest, allocator, json_str, .{});
         defer parsed.deinit();
         return try parsed.value.to_transacao(cliente_id);
     }
 
-    pub fn save(self: *Self, db: *pg.Conn) !void {
+    pub fn save(self: *const Self, db: *pg.Conn) !void {
         const query =
             \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao, realizada_em)
             \\ VALUES ($1, $2, $3, $4, $5)
         ;
 
-        try db.exec(query, .{
-            self.cliente_id,
+        var buffer: [11]u8 = undefined;
+
+        var tipo = buffer[0..1];
+        std.mem.copy(u8, tipo, self.tipo);
+        var descricao = buffer[1..11];
+        std.mem.copy(u8, descricao, self.descricao);
+
+        std.debug.print("tipo: {s}\n", .{tipo});
+        std.debug.print("descricao: {s}\n", .{descricao});
+
+        //FIXME: Find a way to use the self fields directly in the query
+        // Currently it gives compile errors because it doesn't accepts []const u8 values here idk why
+        _ = try db.exec(query, .{
+            self.cliente_id orelse unreachable,
             self.valor,
-            self.tipo,
-            self.descricao,
-            self.realizada_em,
+            tipo,
+            descricao,
+            self.realizada_em.to_timestamp(),
         });
     }
 };
@@ -233,16 +283,31 @@ fn json(req: *const zap.Request, res: anytype) void {
 }
 
 fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
-    _ = cliente_id;
-    _ = r;
-}
-
-fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
-    var db = pool.acquire() catch |err| {
+    var db = pool.?.*.acquire() catch |err| {
         std.debug.print("err: {any}\n", .{err});
         return internal_error(r);
     };
     defer db.release();
+
+    var extrato = Cliente.get_extrato(db, cliente_id) catch |err| {
+        std.debug.print("err: {any}\n", .{err});
+        return internal_error(r);
+    };
+
+    return json(r, extrato);
+}
+
+fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
+    var db = pool.?.*.acquire() catch |err| {
+        std.debug.print("err: {any}\n", .{err});
+        return internal_error(r);
+    };
+    defer db.release();
+    var db2 = pool.?.*.acquire() catch |err| {
+        std.debug.print("err: {any}\n", .{err});
+        return internal_error(r);
+    };
+    defer db2.release();
 
     if (r.body) |body| {
         var transacao = Transacao.from_json(body, cliente_id) catch |err| {
@@ -251,12 +316,19 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
         };
 
         var valor_transacao = transacao.valor;
-        if (std.mem.eql(u8, &transacao.tipo, "d")) {
+        if (std.mem.eql(u8, transacao.tipo, "d")) {
             valor_transacao = valor_transacao * -1;
         }
 
-        var result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch {
+        var result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch |err| {
+            std.debug.print("Cliente.efetuar_transacao() err: {any}\n", .{err});
+
             return unprocessable_entity(r);
+        };
+        transacao.save(db2) catch |err| {
+            std.debug.print("Transacao.save() err: {any}\n", .{err});
+
+            return internal_error(r);
         };
 
         return json(r, result);
@@ -293,7 +365,7 @@ pub fn main() !void {
             .timeout = 10_000,
         },
     });
-    defer pool.deinit();
+    defer pool.?.*.deinit();
 
     var listener = zap.HttpListener.init(.{
         .port = PORT,
