@@ -18,7 +18,7 @@ pub const Time = struct {
     /// from_timestamp assumes that the input timestamp is in UTC
     /// please don't pass time zoned timestamps to it
     pub fn from_timestamp(ts: i64) Self {
-        var ts_u64: u64 = @intCast(ts);
+        const ts_u64: u64 = @intCast(ts);
 
         const SECONDS_PER_DAY = 86400;
         const DAYS_PER_YEAR = 365;

@@ -39,7 +39,7 @@ const Cliente = struct {
         var saldo: i32 = 0;
         var limite: i32 = 0;
         var ultimas_transacoes: ?[10]?Transacao = null;
-        var data_extrato = Time.now().format_rfc3339();
+        const data_extrato = Time.now().format_rfc3339();
 
         var i: u8 = 0;
         while (try res.next()) |row| {
@@ -54,7 +54,7 @@ const Cliente = struct {
                 break;
             }
 
-            var transacao = Transacao{
+            const transacao = Transacao{
                 .cliente_id = cliente_id,
                 .valor = row.get(i32, 2),
                 .tipo = row.get([]const u8, 3),
@@ -93,8 +93,8 @@ const Cliente = struct {
         defer res.deinit();
 
         while (try res.next()) |row| {
-            var saldo = row.get(i32, 0);
-            var limite = row.get(i32, 1);
+            const saldo = row.get(i32, 0);
+            const limite = row.get(i32, 1);
             return .{ .saldo = saldo, .limite = limite };
         }
 
@@ -126,7 +126,7 @@ const TransacaoRequest = struct {
     const Self = @This();
 
     pub fn to_transacao(self: *Self, cliente_id: u8) TransacaoRequestError!Transacao {
-        var valor_mod = std.math.modf(self.valor);
+        const valor_mod = std.math.modf(self.valor);
 
         if (valor_mod.ipart < 0.0 or (valor_mod.fpart != 0.0)) {
             return error.InvalidValor;
@@ -135,13 +135,13 @@ const TransacaoRequest = struct {
             return error.InvalidDescricao;
         }
 
-        var is_credito = std.mem.eql(u8, self.tipo, "c");
-        var is_debito = std.mem.eql(u8, self.tipo, "d");
+        const is_credito = std.mem.eql(u8, self.tipo, "c");
+        const is_debito = std.mem.eql(u8, self.tipo, "d");
         if (!is_credito and !is_debito) {
             return error.InvalidTipo;
         }
 
-        var valor: i32 = @intFromFloat(valor_mod.ipart);
+        const valor: i32 = @intFromFloat(valor_mod.ipart);
 
         return .{ .cliente_id = cliente_id, .valor = valor, .tipo = self.tipo, .descricao = self.descricao, .realizada_em = null };
     }
@@ -164,36 +164,20 @@ const Transacao = struct {
 
     pub fn save(self: *const Self, db: *pg.Conn) !void {
         const query =
-            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao)
-            \\ VALUES ($1, $2, $3, $4)
+            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao) VALUES ($1,$2,$3,$4)
         ;
 
-        var buffer: [11]u8 = undefined;
-
-        var tipo = buffer[0..1];
-        std.mem.copy(u8, tipo, self.tipo);
-        var descricao = buffer[1..11];
-        std.mem.copy(u8, descricao, self.descricao);
-
-        std.debug.print("tipo: {s}\n", .{tipo});
-        std.debug.print("descricao: {s}\n", .{descricao});
-        std.debug.print("realizada_em: {any}\n", .{self.realizada_em});
-
-        //FIXME: Find a way to use the self fields directly in the query
-        // Currently it gives compile errors because it doesn't accepts []const u8 values here idk why
-        var res = try db.query(query, .{
-            self.cliente_id orelse unreachable,
+        _ = try db.exec(query, .{
+            self.cliente_id.?,
             self.valor,
-            tipo,
-            descricao,
+            self.tipo,
+            self.descricao,
         });
-
-        std.debug.print("res: {any}\n", .{res});
     }
 };
 
 fn on_request(r: zap.Request) void {
-    var path = r.path orelse return bad_request(&r);
+    const path = r.path orelse return bad_request(&r);
     var path_parts: [3][]const u8 = .{ "", "", "" };
 
     var it = std.mem.split(u8, path, "/");
@@ -227,7 +211,7 @@ fn on_request(r: zap.Request) void {
     }
 
     if (std.mem.eql(u8, path_parts[0], "clientes")) {
-        var cliente_id = std.fmt.parseInt(u8, path_parts[1], 10) catch {
+        const cliente_id = std.fmt.parseInt(u8, path_parts[1], 10) catch {
             return bad_request(&r);
         };
 
@@ -292,7 +276,7 @@ fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
     };
     defer db.release();
 
-    var extrato = Cliente.get_extrato(db, cliente_id) catch |err| {
+    const extrato = Cliente.get_extrato(db, cliente_id) catch |err| {
         std.debug.print("err: {any}\n", .{err});
         return internal_error(r);
     };
@@ -320,7 +304,7 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
             valor_transacao = valor_transacao * -1;
         }
 
-        var result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch |err| {
+        const result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch |err| {
             std.debug.print("Cliente.efetuar_transacao() err: {any}\n", .{err});
             std.debug.print("transacao: {any}\n", .{transacao});
 
@@ -351,16 +335,16 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
 }
 
 pub fn main() !void {
-    var nr_workers = try std.Thread.getCpuCount();
-    var db_user = std.os.getenv("DB_USER") orelse {
+    const nr_workers = try std.Thread.getCpuCount();
+    const db_user = std.os.getenv("DB_USER") orelse {
         std.debug.print("DB_USER not set\n", .{});
         exit(1);
     };
-    var db_pass = std.os.getenv("DB_PASSWORD") orelse {
+    const db_pass = std.os.getenv("DB_PASSWORD") orelse {
         std.debug.print("DB_PASSWORD not set\n", .{});
         exit(1);
     };
-    var db_name = std.os.getenv("DB_NAME") orelse {
+    const db_name = std.os.getenv("DB_NAME") orelse {
         std.debug.print("DB_NAME not set\n", .{});
         exit(1);
     };
