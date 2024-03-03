@@ -12,7 +12,7 @@ CREATE UNLOGGED TABLE IF NOT EXISTS transacao (
 	valor INTEGER NOT NULL,
 	tipo CHAR(1) NOT NULL,
 	descricao VARCHAR(10) NOT NULL,
-	realizada_em TIMESTAMP NOT NULL DEFAULT NOW(),
+	realizada_em BIGINT NOT NULL,
 	CONSTRAINT fk_cliente_transacao_id
 		FOREIGN KEY (cliente_id) REFERENCES cliente(id)
 );

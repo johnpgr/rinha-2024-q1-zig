@@ -67,7 +67,6 @@ pub const Time = struct {
         padding_two_digits(buf[17..19], self.second);
         buf[19] = 'Z';
 
-        std.debug.print("buf: {s}\n", .{buf});
         return buf;
     }
 

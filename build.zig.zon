@@ -40,16 +40,13 @@
         //},
         .pg = .{
             .url = "git+https://github.com/karlseguin/pg.zig#master",
-            .hash = "1220189204c934e0038216960e1ed69c09e7bb4c7cd08dcd722ff5a5487403ad4af6",
+            .hash = "122035107d64d00d318e634ea62c74a633146ed410b625cc577e82e50b90702342df",
         },
         .zap = .{
             // when tagged:
             // .url = "https://github.com/zigzap/zap/archive/refs/tags/zig-0.12.0.tar.gz",
             .url = "https://github.com/zigzap/zap/archive/zig-0.12.0.tar.gz",
             .hash = "1220ca283c7e4240adbf9dfa31f7894818efc93ce54300521dad777a2670e9674dd8",
-            .paths = .{
-                "",
-            },
         },
     },
 

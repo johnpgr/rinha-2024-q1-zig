@@ -3,7 +3,6 @@ const zap = @import("zap");
 const pg = @import("pg");
 const Time = @import("time.zig").Time;
 const exit = std.os.exit;
-const PORT = 8080;
 
 var gpa = std.heap.GeneralPurposeAllocator(.{
     .thread_safe = true,
@@ -23,6 +22,7 @@ const Cliente = struct {
     saldo: i32,
 
     const Self = @This();
+
     pub fn get_extrato(db: *pg.Conn, cliente_id: u8) !Extrato {
         const query =
             \\ SELECT c.saldo, c.limite, t.valor, t.tipo, t.descricao, t.realizada_em
@@ -38,42 +38,43 @@ const Cliente = struct {
 
         var saldo: i32 = 0;
         var limite: i32 = 0;
-        var ultimas_transacoes: ?[10]?Transacao = null;
+        var ultimas_transacoes: ?std.ArrayList(ExtratoTransacaoResponse) = null;
         const data_extrato = Time.now().format_rfc3339();
 
-        var i: u8 = 0;
         while (try res.next()) |row| {
-            if (i == 9) {
-                break;
-            }
-
             saldo = row.get(i32, 0);
             limite = row.get(i32, 1);
 
+            // if there are no transactions, break
             if (row.values[2].is_null) {
                 break;
             }
 
-            const transacao = Transacao{
-                .cliente_id = cliente_id,
+            const realizada_em = Time.from_timestamp(row.get(i64, 5)).format_rfc3339();
+
+            const transacao = ExtratoTransacaoResponse{
                 .valor = row.get(i32, 2),
                 .tipo = row.get([]const u8, 3),
                 .descricao = row.get([]const u8, 4),
-                .realizada_em = row.get([]const u8, 5),
+                .realizada_em = realizada_em,
             };
 
             if (ultimas_transacoes == null) {
-                ultimas_transacoes = .{ null, null, null, null, null, null, null, null, null, null };
+                ultimas_transacoes = try std.ArrayList(ExtratoTransacaoResponse).initCapacity(allocator, 10);
+                try ultimas_transacoes.?.append(transacao);
+            } else {
+                try ultimas_transacoes.?.append(transacao);
             }
-            ultimas_transacoes.?[i] = transacao;
-
-            i += 1;
         }
 
-        return .{
-            .saldo = .{ .total = saldo, .data_extrato = data_extrato, .limite = limite },
-            .ultimas_transacoes = ultimas_transacoes,
-        };
+        if (ultimas_transacoes == null) {
+            return .{ .saldo = .{ .total = saldo, .data_extrato = data_extrato, .limite = limite }, .ultimas_transacoes = null };
+        } else {
+            return .{
+                .saldo = .{ .total = saldo, .data_extrato = data_extrato, .limite = limite },
+                .ultimas_transacoes = try ultimas_transacoes.?.toOwnedSlice(),
+            };
+        }
     }
 
     pub fn efetuar_transacao(db: *pg.Conn, cliente_id: u8, valor_transacao: i32) !TransacaoResponse {
@@ -102,13 +103,22 @@ const Cliente = struct {
     }
 };
 
+const ExtratoTransacaoResponse = struct {
+    valor: i32,
+    tipo: []const u8,
+    descricao: []const u8,
+    realizada_em: [20]u8,
+};
+
 const Extrato = struct {
     saldo: struct {
         total: i32,
         data_extrato: [20]u8,
         limite: i32,
     },
-    ultimas_transacoes: ?[10]?Transacao,
+    ultimas_transacoes: ?[]ExtratoTransacaoResponse,
+
+    const Self = @This();
 };
 
 const TransacaoRequestError = error{
@@ -143,16 +153,16 @@ const TransacaoRequest = struct {
 
         const valor: i32 = @intFromFloat(valor_mod.ipart);
 
-        return .{ .cliente_id = cliente_id, .valor = valor, .tipo = self.tipo, .descricao = self.descricao, .realizada_em = null };
+        return .{ .cliente_id = cliente_id, .valor = valor, .tipo = self.tipo, .descricao = self.descricao, .realizada_em = std.time.timestamp() };
     }
 };
 
 const Transacao = struct {
-    cliente_id: ?u8,
+    cliente_id: u8,
     valor: i32,
     tipo: []const u8,
     descricao: []const u8,
-    realizada_em: ?[]const u8,
+    realizada_em: i64,
 
     const Self = @This();
 
@@ -164,14 +174,15 @@ const Transacao = struct {
 
     pub fn save(self: *const Self, db: *pg.Conn) !void {
         const query =
-            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao) VALUES ($1,$2,$3,$4)
+            \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao, realizada_em) VALUES ($1, $2, $3, $4, $5)
         ;
 
         _ = try db.exec(query, .{
-            self.cliente_id.?,
+            self.cliente_id,
             self.valor,
             self.tipo,
             self.descricao,
+            self.realizada_em,
         });
     }
 };
@@ -252,25 +263,22 @@ fn internal_error(req: *const zap.Request) void {
 }
 
 fn json(req: *const zap.Request, res: anytype) void {
-    var buf: [200]u8 = undefined;
     var json_to_send: []const u8 = undefined;
+    var string = std.ArrayList(u8).init(allocator);
+    defer string.deinit();
+    std.json.stringify(res, .{}, string.writer()) catch |err| {
+        std.debug.print("json stringify error: {any}\n", .{err});
+        return internal_error(req);
+    };
+    json_to_send = string.items;
 
-    if (zap.stringifyBuf(&buf, res, .{})) |json_str| {
-        json_to_send = json_str;
-    } else {
-        req.setStatus(.internal_server_error);
-        req.sendBody("") catch unreachable;
-        return;
-    }
-
-    std.debug.print("json_to_send {s}\n", .{json_to_send});
     req.setStatus(.ok);
     req.setContentType(.JSON) catch unreachable;
     req.sendBody(json_to_send) catch unreachable;
 }
 
 fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
-    var db = pool.?.*.acquire() catch |err| {
+    const db = pool.?.*.acquire() catch |err| {
         std.debug.print("err: {any}\n", .{err});
         return internal_error(r);
     };
@@ -280,8 +288,6 @@ fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
         std.debug.print("err: {any}\n", .{err});
         return internal_error(r);
     };
-
-    std.debug.print("extrato.saldo.data_extrato: {s}\n", .{extrato.saldo.data_extrato});
 
     return json(r, extrato);
 }
@@ -311,15 +317,7 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
             return unprocessable_entity(r);
         };
 
-        var ready = false;
-        while (!ready) {
-            db.readyForQuery() catch {
-                continue;
-            };
-
-            ready = true;
-            break;
-        }
+        wait_conn(db);
 
         transacao.save(db) catch |err| {
             std.debug.print("Transacao.save() err: {any}\n", .{err});
@@ -334,8 +332,21 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
     return bad_request(r);
 }
 
+fn wait_conn(conn: *pg.Conn) void {
+    while (true) {
+        conn.readyForQuery() catch {
+            continue;
+        };
+        break;
+    }
+}
+
 pub fn main() !void {
     const nr_workers = try std.Thread.getCpuCount();
+    const port = std.os.getenv("PORT") orelse {
+        std.debug.print("PORT not set\n", .{});
+        exit(1);
+    };
     const db_user = std.os.getenv("DB_USER") orelse {
         std.debug.print("DB_USER not set\n", .{});
         exit(1);
@@ -348,12 +359,20 @@ pub fn main() !void {
         std.debug.print("DB_NAME not set\n", .{});
         exit(1);
     };
+    const db_host = std.os.getenv("DB_HOST") orelse {
+        std.debug.print("DB_NAME not set\n", .{});
+        exit(1);
+    };
+    const db_port = std.os.getenv("DB_PORT") orelse {
+        std.debug.print("DB_NAME not set\n", .{});
+        exit(1);
+    };
 
     pool = try pg.Pool.init(allocator, .{
         .size = @intCast(nr_workers),
         .connect = .{
-            .port = 5432,
-            .host = "localhost",
+            .host = db_host,
+            .port = try std.fmt.parseInt(u16, db_port, 10),
         },
         .auth = .{
             .username = db_user,
@@ -365,9 +384,9 @@ pub fn main() !void {
     defer pool.?.*.deinit();
 
     var listener = zap.HttpListener.init(.{
-        .port = PORT,
+        .port = try std.fmt.parseInt(usize, port, 10),
         .on_request = on_request,
-        .log = true,
+        .log = false,
         .max_clients = 100_000,
     });
 
@@ -376,7 +395,7 @@ pub fn main() !void {
         exit(1);
     };
 
-    std.debug.print("[ZAP] Running app on 0.0.0.0:{}\n[ZAP] We have {} workers\n", .{ PORT, nr_workers });
+    std.debug.print("[ZAP] Running app on 0.0.0.0:{s}\n[ZAP] We have {} workers\n", .{ port, nr_workers });
 
     zap.start(.{
         .threads = @intCast(nr_workers),

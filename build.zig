@@ -35,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
     exe.root_module.addImport("pg", pg.module("pg"));
 
     // This declares intent for the executable to be installed into the
