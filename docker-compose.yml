@@ -9,7 +9,7 @@ services:
       - PORT=8080
       - DB_PORT=5432
       - DB_USER=user
-      - DB_PASSWORD=1234
+      - DB_PASS=1234
       - DB_NAME=rinha-2024-q1
       - DB_HOST=database
     # restart: unless-stopped
@@ -29,7 +29,7 @@ services:
       - PORT=8081
       - DB_PORT=5432
       - DB_USER=user
-      - DB_PASSWORD=1234
+      - DB_PASS=1234
       - DB_NAME=rinha-2024-q1
       - DB_HOST=database
 

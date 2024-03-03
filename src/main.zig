@@ -1,5 +1,6 @@
 const std = @import("std");
 const zap = @import("zap");
+const db = @import("db.zig");
 const pg = @import("pg");
 const Time = @import("time.zig").Time;
 const exit = std.os.exit;
@@ -7,8 +8,7 @@ const exit = std.os.exit;
 var gpa = std.heap.GeneralPurposeAllocator(.{
     .thread_safe = true,
 }){};
-var allocator = gpa.allocator();
-var pool: ?*pg.Pool = null;
+const allocator = gpa.allocator();
 
 const TransacaoResponse = struct {
     saldo: i32,
@@ -17,45 +17,53 @@ const TransacaoResponse = struct {
 
 const Cliente = struct {
     id: u8,
-    nome: []u8,
+    nome: []const u8,
     limite: i32,
     saldo: i32,
 
     const Self = @This();
 
-    pub fn get_extrato(db: *pg.Conn, cliente_id: u8) !Extrato {
-        const query =
-            \\ SELECT c.saldo, c.limite, t.valor, t.tipo, t.descricao, t.realizada_em
-            \\ FROM cliente c
-            \\ LEFT JOIN transacao t ON c.id = t.cliente_id
-            \\ WHERE c.id = $1
-            \\ ORDER BY t.id DESC
+    pub fn get_extrato(conn: *pg.Conn, cliente_id: u8) !Extrato {
+        const query_cliente =
+            \\ SELECT saldo, limite
+            \\ FROM cliente
+            \\ WHERE id = $1
+        ;
+
+        const query_transacoes =
+            \\ SELECT valor, tipo, descricao, realizada_em
+            \\ FROM transacao
+            \\ WHERE cliente_id = $1
+            \\ ORDER BY id DESC
             \\ LIMIT 10
         ;
 
-        var res = try db.query(query, .{cliente_id});
-        defer res.deinit();
+        var res_cliente = try conn.query(query_cliente, .{cliente_id});
+        defer res_cliente.deinit();
 
         var saldo: i32 = 0;
         var limite: i32 = 0;
-        var ultimas_transacoes: ?std.ArrayList(ExtratoTransacaoResponse) = null;
-        const data_extrato = Time.now().format_rfc3339();
-
-        while (try res.next()) |row| {
+        while (try res_cliente.next()) |row| {
             saldo = row.get(i32, 0);
             limite = row.get(i32, 1);
+        }
 
-            // if there are no transactions, break
-            if (row.values[2].is_null) {
-                break;
-            }
+        const data_extrato = Time.now().format_rfc3339();
 
-            const realizada_em = Time.from_timestamp(row.get(i64, 5)).format_rfc3339();
+        var res_transacoes = try conn.query(query_transacoes, .{cliente_id});
+        defer res_transacoes.deinit();
+        var ultimas_transacoes: ?std.ArrayList(ExtratoTransacaoResponse) = null;
+
+        while (try res_transacoes.next()) |row| {
+            const valor = row.get(i32, 0);
+            const realizada_em = Time.from_timestamp(row.get(i64, 3)).format_rfc3339();
+            const tipo = row.get([]const u8, 1);
+            const descricao = row.get([]const u8, 2);
 
             const transacao = ExtratoTransacaoResponse{
-                .valor = row.get(i32, 2),
-                .tipo = row.get([]const u8, 3),
-                .descricao = row.get([]const u8, 4),
+                .valor = valor,
+                .tipo = tipo,
+                .descricao = descricao,
                 .realizada_em = realizada_em,
             };
 
@@ -77,7 +85,7 @@ const Cliente = struct {
         }
     }
 
-    pub fn efetuar_transacao(db: *pg.Conn, cliente_id: u8, valor_transacao: i32) !TransacaoResponse {
+    pub fn efetuar_transacao(conn: *pg.Conn, cliente_id: u8, valor_transacao: i32) !TransacaoResponse {
         const query =
             \\ UPDATE cliente
             \\ SET saldo = saldo + $2
@@ -87,7 +95,7 @@ const Cliente = struct {
             \\ RETURNING saldo, limite
         ;
 
-        var res = try db.query(query, .{
+        var res = try conn.query(query, .{
             cliente_id,
             valor_transacao,
         });
@@ -103,6 +111,7 @@ const Cliente = struct {
     }
 };
 
+///size in bytes: 35
 const ExtratoTransacaoResponse = struct {
     valor: i32,
     tipo: []const u8,
@@ -172,12 +181,12 @@ const Transacao = struct {
         return try parsed.value.to_transacao(cliente_id);
     }
 
-    pub fn save(self: *const Self, db: *pg.Conn) !void {
+    pub fn save(self: *const Self, conn: *pg.Conn) !void {
         const query =
             \\ INSERT INTO transacao (cliente_id, valor, tipo, descricao, realizada_em) VALUES ($1, $2, $3, $4, $5)
         ;
 
-        _ = try db.exec(query, .{
+        _ = try conn.exec(query, .{
             self.cliente_id,
             self.valor,
             self.tipo,
@@ -266,8 +275,8 @@ fn json(req: *const zap.Request, res: anytype) void {
     var json_to_send: []const u8 = undefined;
     var string = std.ArrayList(u8).init(allocator);
     defer string.deinit();
-    std.json.stringify(res, .{}, string.writer()) catch |err| {
-        std.debug.print("json stringify error: {any}\n", .{err});
+
+    std.json.stringify(res, .{}, string.writer()) catch {
         return internal_error(req);
     };
     json_to_send = string.items;
@@ -278,14 +287,13 @@ fn json(req: *const zap.Request, res: anytype) void {
 }
 
 fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
-    const db = pool.?.*.acquire() catch |err| {
-        std.debug.print("err: {any}\n", .{err});
+    const conn = db.pool.?.*.acquire() catch {
         return internal_error(r);
     };
-    defer db.release();
+    defer conn.release();
 
-    const extrato = Cliente.get_extrato(db, cliente_id) catch |err| {
-        std.debug.print("err: {any}\n", .{err});
+    const extrato = Cliente.get_extrato(conn, cliente_id) catch |err| {
+        std.debug.print("Cliente.get_extrato error: {any}\n", .{err});
         return internal_error(r);
     };
 
@@ -293,15 +301,13 @@ fn route_cliente_extrato(r: *const zap.Request, cliente_id: u8) void {
 }
 
 fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
-    var db = pool.?.*.acquire() catch |err| {
-        std.debug.print("err: {any}\n", .{err});
+    var conn = db.pool.?.*.acquire() catch {
         return internal_error(r);
     };
-    defer db.release();
+    defer conn.release();
 
     if (r.body) |body| {
-        var transacao = Transacao.from_json(body, cliente_id) catch |err| {
-            std.debug.print("err: {any}\n", .{err});
+        var transacao = Transacao.from_json(body, cliente_id) catch {
             return unprocessable_entity(r);
         };
 
@@ -310,19 +316,13 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
             valor_transacao = valor_transacao * -1;
         }
 
-        const result = Cliente.efetuar_transacao(db, cliente_id, valor_transacao) catch |err| {
-            std.debug.print("Cliente.efetuar_transacao() err: {any}\n", .{err});
-            std.debug.print("transacao: {any}\n", .{transacao});
-
+        const result = Cliente.efetuar_transacao(conn, cliente_id, valor_transacao) catch {
             return unprocessable_entity(r);
         };
 
-        wait_conn(db);
+        db.wait_conn(conn);
 
-        transacao.save(db) catch |err| {
-            std.debug.print("Transacao.save() err: {any}\n", .{err});
-            std.debug.print("transacao: {any}\n", .{transacao});
-
+        transacao.save(conn) catch {
             return internal_error(r);
         };
 
@@ -332,26 +332,14 @@ fn route_cliente_transacoes(r: *const zap.Request, cliente_id: u8) void {
     return bad_request(r);
 }
 
-fn wait_conn(conn: *pg.Conn) void {
-    while (true) {
-        conn.readyForQuery() catch {
-            continue;
-        };
-        break;
-    }
-}
-
 pub fn main() !void {
-    const nr_workers = try std.Thread.getCpuCount();
-    const port = std.os.getenv("PORT") orelse {
-        std.debug.print("PORT not set\n", .{});
-        exit(1);
-    };
+    const nr_workers = 4;
+    // const nr_workers = try std.Thread.getCpuCount();
     const db_user = std.os.getenv("DB_USER") orelse {
         std.debug.print("DB_USER not set\n", .{});
         exit(1);
     };
-    const db_pass = std.os.getenv("DB_PASSWORD") orelse {
+    const db_pass = std.os.getenv("DB_PASS") orelse {
         std.debug.print("DB_PASSWORD not set\n", .{});
         exit(1);
     };
@@ -368,29 +356,29 @@ pub fn main() !void {
         exit(1);
     };
 
-    pool = try pg.Pool.init(allocator, .{
-        .size = @intCast(nr_workers),
-        .connect = .{
-            .host = db_host,
-            .port = try std.fmt.parseInt(u16, db_port, 10),
-        },
-        .auth = .{
-            .username = db_user,
-            .password = db_pass,
-            .database = db_name,
-            .timeout = 10_000,
-        },
-    });
-    defer pool.?.*.deinit();
+    const port = std.os.getenv("PORT") orelse {
+        std.debug.print("PORT not set\n", .{});
+        exit(1);
+    };
 
-    var listener = zap.HttpListener.init(.{
+    try db.init(allocator, .{
+        .host = db_host,
+        .port = try std.fmt.parseInt(u16, db_port, 10),
+        .pool_size = @intCast(nr_workers),
+        .db_user = db_user,
+        .db_pass = db_pass,
+        .db_name = db_name,
+    });
+    defer db.deinit();
+
+    var server = zap.HttpListener.init(.{
         .port = try std.fmt.parseInt(usize, port, 10),
         .on_request = on_request,
         .log = false,
         .max_clients = 100_000,
     });
 
-    listener.listen() catch |err| {
+    server.listen() catch |err| {
         std.debug.print("Error: {any}\n", .{err});
         exit(1);
     };
