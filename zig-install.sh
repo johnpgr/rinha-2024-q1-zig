@@ -1,26 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
-BASE_URL='https://ziglang.org/download/index.json'
-
-get_url() {
-  local platform=$1
-  local arch=$2
-
-  local url=""
-
-	url=$( \
-		curl -s $BASE_URL \
-		| sed -n 's/"tarball": "\(.*\/builds\/.*zig-'"$platform"'-'"$arch"'-[0-9\.]*.*\)",/\1/p' \
-	)
-
-  echo -n $url
-}
-
 my_mktemp() {
   local tempdir=""
 
-	tempdir=$(mktemp -d zig.XXXX)
+  tempdir=$(mktemp -d zig.XXXX)
 
   echo -n $tempdir
 }
@@ -28,11 +11,9 @@ my_mktemp() {
 install_zig() {
   local install_path=$1
 
-  local platform="linux"
-  local arch="x86_64"
   local tempdir=$(my_mktemp $platform)
-	echo "tempdir: $tempdir"
-  local url=$(get_url $platform $arch)
+  echo "tempdir: $tempdir"
+  local url="https://ziglang.org/download/0.11.0/zig-linux-x86_64-0.11.0.tar.xz"
 
   echo "Downloading ${url}..."
   curl "${url}" -o "${tempdir}/archive"

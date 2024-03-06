@@ -10,6 +10,6 @@ RUN /app/zig-install.sh
 COPY /build.zig /app
 COPY /build.zig.zon /app
 COPY /src /app/src
-RUN /opt/zig build --release=fast
+RUN /opt/zig build -Doptimize=ReleaseFast
 
-ENTRYPOINT ["/app/zig-out/bin/rinha-2024-q1-ziglang"]
+ENTRYPOINT ["/app/zig-out/bin/rinha-2024-q1-zig"]

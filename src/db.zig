@@ -4,15 +4,6 @@ const exit = std.os.exit;
 
 pub var pool: ?*pg.Pool = null;
 
-pub fn wait_conn(conn: *pg.Conn) void {
-    while (true) {
-        conn.readyForQuery() catch {
-            continue;
-        };
-        break;
-    }
-}
-
 pub fn deinit() void {
     if (pool != null) {
         pool.?.deinit();
@@ -29,12 +20,13 @@ pub const Config = struct {
 };
 
 pub fn init(allocator: std.mem.Allocator, config: Config) !void {
-    pool.? = try pg.Pool.init(allocator, .{
+    pool = try pg.Pool.init(allocator, .{
         .size = config.pool_size,
         .connect = .{
             .host = config.host,
             .port = config.port,
         },
+        .timeout = 100 * std.time.ms_per_s,
         .auth = .{
             .username = config.db_user,
             .password = config.db_pass,

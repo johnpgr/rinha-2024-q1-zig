@@ -38,16 +38,11 @@
         //    // computed. This field and `url` are mutually exclusive.
         //    .path = "foo",
         //},
-        .pg = .{
-            .url = "git+https://github.com/karlseguin/pg.zig#master",
-            .hash = "122035107d64d00d318e634ea62c74a633146ed410b625cc577e82e50b90702342df",
-        },
         .zap = .{
-            // when tagged:
-            // .url = "https://github.com/zigzap/zap/archive/refs/tags/zig-0.12.0.tar.gz",
-            .url = "https://github.com/zigzap/zap/archive/zig-0.12.0.tar.gz",
-            .hash = "1220ca283c7e4240adbf9dfa31f7894818efc93ce54300521dad777a2670e9674dd8",
+            .url = "https://github.com/zigzap/zap/archive/refs/tags/v0.5.1.tar.gz",
+            .hash = "1220d4802fb09d4e99c0e7265f90d6f3cfdc3e5e31c1b05f0924ee2dd26d9d6dbbf4",
         },
+        .pg = .{ .url = "https://github.com/karlseguin/pg.zig/archive/zig-0.11.tar.gz", .hash = "1220c6b327ab59bcdcf17411d1d840909ba09c44a58e6ca65a39ce10a11387bf862a" },
     },
 
     // Specifies the set of files and directories that are included in this package.
